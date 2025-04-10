@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "dgSpecHash": "k3rE7fjm+Lg=",
+  "success": true,
+  "projectFilePath": "C:\\Users\\gewbi\\source\\repos\\AddHouses\\AddHouses.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\gewbi\\.nuget\\packages\\google.protobuf\\3.30.2\\google.protobuf.3.30.2.nupkg.sha512"
+  ],
+  "logs": []
+}
