@@ -13,7 +13,6 @@
 #include "config/configmanager.hpp"
 #include "core.hpp"
 #include "creatures/appearance/mounts/mounts.hpp"
-#include "creatures/appearance/attached_effects/attached_effects.hpp"
 #include "creatures/combat/combat.hpp"
 #include "creatures/combat/condition.hpp"
 #include "creatures/interactions/chat.hpp"
@@ -72,8 +71,7 @@ Player::Player(std::shared_ptr<ProtocolGame> p) :
 	m_playerBadge(*this),
 	m_playerCyclopedia(*this),
 	m_playerTitle(*this),
-	m_animusMastery(*this),
-	m_playerAttachedEffects(*this) { }
+	m_animusMastery(*this) { }
 
 Player::~Player() {
 	for (const auto &item : inventory) {
@@ -1047,14 +1045,6 @@ void Player::addStorageValue(const uint32_t key, const int32_t value, const bool
 			return;
 		}
 		if (IS_IN_KEYRANGE(key, MOUNTS_RANGE)) {
-			// do nothing
-		} else if (IS_IN_KEYRANGE(key, WING_RANGE)) {
-			// do nothing
-		} else if (IS_IN_KEYRANGE(key, EFFECT_RANGE)) {
-			// do nothing
-		} else if (IS_IN_KEYRANGE(key, AURA_RANGE)) {
-			// do nothing
-		} else if (IS_IN_KEYRANGE(key, SHADER_RANGE)) {
 			// do nothing
 		} else if (IS_IN_KEYRANGE(key, FAMILIARS_RANGE)) {
 			familiars.emplace_back(
@@ -2803,7 +2793,6 @@ uint16_t Player::getDisplayXpBoostPercent() const {
 
 void Player::setXpBoostPercent(uint16_t percent) {
 	xpBoostPercent = percent;
-	sendStats();
 }
 
 uint16_t Player::getStaminaXpBoost() const {
@@ -7612,175 +7601,228 @@ void Player::sendTakeScreenshot(Screenshot_t screenshotType) const {
 }
 
 void Player::onThink(uint32_t interval) {
-	Creature::onThink(interval);
+    Creature::onThink(interval);
 
-	sendPing();
+    sendPing();
 
-	MessageBufferTicks += interval;
-	if (MessageBufferTicks >= 1500) {
-		MessageBufferTicks = 0;
-		addMessageBuffer();
-	}
+    MessageBufferTicks += interval;
+    if (MessageBufferTicks >= 1500) {
+        MessageBufferTicks = 0;
+        addMessageBuffer();
+    }
 
-	// Transcendance (avatar trigger)
-	triggerTranscendance();
-	// Momentum (cooldown resets)
-	triggerMomentum();
-	const auto &playerTile = getTile();
-	const bool vipStaysOnline = isVip() && g_configManager().getBoolean(VIP_STAY_ONLINE);
-	idleTime += interval;
-	if (playerTile && !playerTile->hasFlag(TILESTATE_NOLOGOUT) && !isAccessPlayer() && !isExerciseTraining() && !vipStaysOnline) {
-		const int32_t kickAfterMinutes = g_configManager().getNumber(KICK_AFTER_MINUTES);
-		if (idleTime > (kickAfterMinutes * 60000) + 60000) {
-			removePlayer(true);
-		} else if (client && idleTime == 60000 * kickAfterMinutes) {
-			std::ostringstream ss;
-			ss << "There was no variation in your behaviour for " << kickAfterMinutes << " minutes. You will be disconnected in one minute if there is no change in your actions until then.";
-			client->sendTextMessage(TextMessage(MESSAGE_ADMINISTRATOR, ss.str()));
-		}
-	}
+    // Transcendance (avatar trigger)
+    triggerTranscendance();
+    // Momentum (cooldown resets)
+    triggerMomentum();
 
-	if (g_game().getWorldType() != WORLD_TYPE_PVP_ENFORCED) {
-		checkSkullTicks(interval / 1000);
-	}
+    const auto& playerTile = getTile();
+    const bool vipStaysOnline = isVip() && g_configManager().getBoolean(VIP_STAY_ONLINE);
 
-	addOfflineTrainingTime(interval);
-	if (lastStatsTrainingTime != getOfflineTrainingTime() / 60 / 1000) {
-		sendStats();
-	}
+    idleTime += interval;
+    if (playerTile && !playerTile->hasFlag(TILESTATE_NOLOGOUT) && !isAccessPlayer() && !isExerciseTraining() && !vipStaysOnline) {
+        const int32_t kickAfterMinutes = g_configManager().getNumber(KICK_AFTER_MINUTES);
+        if (idleTime > (kickAfterMinutes * 60000) + 60000) {
+            removePlayer(true);
+        } else if (client && idleTime == 60000 * kickAfterMinutes) {
+            std::ostringstream ss;
+            ss << "There was no variation in your behaviour for " << kickAfterMinutes << " minutes. You will be disconnected in one minute if there is no change in your actions until then.";
+            client->sendTextMessage(TextMessage(MESSAGE_ADMINISTRATOR, ss.str()));
+        }
+    }
 
-	// Wheel of destiny major spells
-	wheel().onThink();
+    if (g_game().getWorldType() != WORLD_TYPE_PVP_ENFORCED) {
+        checkSkullTicks(interval / 1000);
+    }
 
-	g_callbacks().executeCallback(EventCallback_t::playerOnThink, &EventCallback::playerOnThink, getPlayer(), interval);
+    addOfflineTrainingTime(interval);
+    if (lastStatsTrainingTime != getOfflineTrainingTime() / 60 / 1000) {
+        sendStats();
+    }
+
+    // Wheel of destiny major spells
+    wheel().onThink();
+
+    // Callbacks
+    g_callbacks().executeCallback(EventCallback_t::playerOnThink, &EventCallback::playerOnThink, getPlayer(), interval);
+
+    // ====== OTIMIZAÇÃO DE INVENTÁRIO ======
+    auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()
+    ).count();
+
+    // Atualiza inventário em batch
+    if (updateInventory || (!updatedItems.empty() && (now - lastUpdateTime) > updateCooldown)) {
+        sendInventoryIds(); // Atualiza apenas os inventários
+        updatedItems.clear();
+        updateInventory = false;
+        lastUpdateTime = now;
+    }
+
+    // Atualiza containers que foram alterados (loot pouch, BPs abertas, etc)
+    if (updateContainersScheduled) {
+        for (const auto& container : alteredContainers) {
+            if (container) {
+                onSendContainer(container); // Envia o container inteiro atualizado
+            }
+        }
+        alteredContainers.clear();
+        updateContainersScheduled = false;
+    }
+
+    // Atualiza stats do player se necessário (ex: cap, speed, etc)
+    if (updateStats) {
+        sendStats();
+        updateStats = false;
+    }
 }
 
+
 void Player::postAddNotification(const std::shared_ptr<Thing> &thing, const std::shared_ptr<Cylinder> &oldParent, int32_t index, CylinderLink_t link) {
-	if (link == LINK_OWNER) {
-		// calling movement scripts
-		g_moveEvents().onPlayerEquip(getPlayer(), thing->getItem(), static_cast<Slots_t>(index), false);
-	}
+    if (link == LINK_OWNER) {
+        // calling movement scripts
+        g_moveEvents().onPlayerEquip(getPlayer(), thing->getItem(), static_cast<Slots_t>(index), false);
+    }
 
-	bool requireListUpdate = true;
-	if (link == LINK_OWNER || link == LINK_TOPPARENT) {
-		const auto &item = oldParent ? oldParent->getItem() : nullptr;
-		const auto &container = item ? item->getContainer() : nullptr;
-		if (container) {
-			requireListUpdate = container->getHoldingPlayer() != getPlayer();
-		} else {
-			requireListUpdate = oldParent != getPlayer();
-		}
+    bool requireListUpdate = true;
+    if (link == LINK_OWNER || link == LINK_TOPPARENT) {
+        const auto &item = oldParent ? oldParent->getItem() : nullptr;
+        const auto &container = item ? item->getContainer() : nullptr;
+        if (container) {
+            requireListUpdate = container->getHoldingPlayer() != getPlayer();
+        } else {
+            requireListUpdate = oldParent != getPlayer();
+        }
 
-		updateInventoryWeight();
-		updateItemsLight();
-		sendInventoryIds();
-		sendStats();
-	}
+        updateInventoryWeight();
+        updateItemsLight();
+        // sendInventoryIds(); // NÃO envia mais diretamente
 
-	if (const auto &item = thing->getItem()) {
-		if (const auto &container = item->getContainer()) {
-			onSendContainer(container);
-		}
+        if (thing && thing->getItem()) {
+            updatedItems.push_back(thing->getItem());
+        }
+        updateInventory = true;
+        updateStats = true;
+    }
 
-		if (shopOwner && !scheduledSaleUpdate && requireListUpdate) {
-			updateSaleShopList(item);
-		}
-	} else if (const auto &creature = thing->getCreature()) {
-		if (creature == getPlayer()) {
-			// check containers
-			std::vector<std::shared_ptr<Container>> containers;
-
-			for (const auto &[containerId, containerInfo] : openContainers) {
-				const auto &container = containerInfo.container;
-				if (container == nullptr) {
-					continue;
-				}
-
-				if (!Position::areInRange<1, 1, 0>(container->getPosition(), getPosition())) {
-					containers.emplace_back(container);
-				}
-			}
-
-			for (const auto &container : containers) {
-				autoCloseContainers(container);
+    if (const auto &item = thing->getItem()) {
+		if (auto parent = item->getParent()) {
+			if (auto container = std::dynamic_pointer_cast<Container>(parent)) {
+				alteredContainers.insert(container);
+				updateContainersScheduled = true;
 			}
 		}
-	}
+
+        if (shopOwner && !scheduledSaleUpdate && requireListUpdate) {
+            updateSaleShopList(item);
+        }
+    } else if (const auto &creature = thing->getCreature()) {
+        if (creature == getPlayer()) {
+            // check containers
+            std::vector<std::shared_ptr<Container>> containers;
+
+            for (const auto &[containerId, containerInfo] : openContainers) {
+                const auto &container = containerInfo.container;
+                if (container == nullptr) {
+                    continue;
+                }
+
+                if (!Position::areInRange<1, 1, 0>(container->getPosition(), getPosition())) {
+                    containers.emplace_back(container);
+                }
+            }
+
+            for (const auto &container : containers) {
+                autoCloseContainers(container);
+            }
+        }
+    }
 }
 
 void Player::postRemoveNotification(const std::shared_ptr<Thing> &thing, const std::shared_ptr<Cylinder> &newParent, int32_t index, CylinderLink_t link) {
-	if (!thing) {
-		return;
-	}
+    if (!thing) {
+        return;
+    }
 
-	const auto copyThing = thing;
-	const auto copyNewParent = newParent;
+    const auto copyThing = thing;
+    const auto copyNewParent = newParent;
 
-	if (link == LINK_OWNER) {
-		if (const auto &item = copyThing->getItem()) {
-			g_moveEvents().onPlayerDeEquip(getPlayer(), item, static_cast<Slots_t>(index));
-		}
-	}
-	bool requireListUpdate = true;
+    if (link == LINK_OWNER) {
+        if (const auto &item = copyThing->getItem()) {
+            g_moveEvents().onPlayerDeEquip(getPlayer(), item, static_cast<Slots_t>(index));
+        }
+    }
 
-	if (link == LINK_OWNER || link == LINK_TOPPARENT) {
-		const auto &item = copyNewParent ? copyNewParent->getItem() : nullptr;
-		const auto &container = item ? item->getContainer() : nullptr;
-		if (container) {
-			requireListUpdate = container->getHoldingPlayer() != getPlayer();
-		} else {
-			requireListUpdate = copyNewParent != getPlayer();
-		}
+    bool requireListUpdate = true;
+    if (link == LINK_OWNER || link == LINK_TOPPARENT) {
+        const auto &item = copyNewParent ? copyNewParent->getItem() : nullptr;
+        const auto &container = item ? item->getContainer() : nullptr;
+        if (container) {
+            requireListUpdate = container->getHoldingPlayer() != getPlayer();
+        } else {
+            requireListUpdate = copyNewParent != getPlayer();
+        }
 
-		updateInventoryWeight();
-		updateItemsLight();
-		sendInventoryIds();
-		sendStats();
-	}
+        updateInventoryWeight();
+        updateItemsLight();
+        // sendInventoryIds(); // NÃO envia mais diretamente
 
-	if (const auto &item = copyThing->getItem()) {
-		if (const auto &container = item->getContainer()) {
-			checkLootContainers(container);
+        if (thing && thing->getItem()) {
+            updatedItems.push_back(thing->getItem());
+        }
+        updateInventory = true;
+        updateStats = true;
+    }
 
-			if (container->isRemoved() || !Position::areInRange<1, 1, 0>(getPosition(), container->getPosition())) {
-				autoCloseContainers(container);
-			} else if (container->getTopParent() == getPlayer()) {
-				onSendContainer(container);
-			} else if (const auto &topContainer = std::dynamic_pointer_cast<Container>(container->getTopParent())) {
-				if (const auto &depotChest = std::dynamic_pointer_cast<DepotChest>(topContainer)) {
-					bool isOwner = false;
-
-					for (const auto &[depotId, depotChestMap] : depotChests) {
-						if (depotId == 0) {
-							continue;
-						}
-
-						if (depotChestMap == depotChest) {
-							isOwner = true;
-							onSendContainer(container);
-						}
-					}
-
-					if (!isOwner) {
-						autoCloseContainers(container);
-					}
-				} else {
-					onSendContainer(container);
-				}
-			} else {
-				autoCloseContainers(container);
+    if (const auto &item = copyThing->getItem()) {
+		if (auto parent = item->getParent()) {
+			if (auto container = std::dynamic_pointer_cast<Container>(parent)) {
+				alteredContainers.insert(container);
+				updateContainersScheduled = true;
 			}
 		}
 
-		// force list update if item exists tier
-		if (item->getTier() > 0 && !requireListUpdate) {
-			requireListUpdate = true;
-		}
+        if (const auto &container = item->getContainer()) {
+            checkLootContainers(container);
 
-		if (shopOwner && !scheduledSaleUpdate && requireListUpdate) {
-			updateSaleShopList(item);
-		}
-	}
+            if (container->isRemoved() || !Position::areInRange<1, 1, 0>(getPosition(), container->getPosition())) {
+                autoCloseContainers(container);
+            } else if (container->getTopParent() == getPlayer()) {
+                // Já alteramos acima (não precisa repetir aqui)
+            } else if (const auto &topContainer = std::dynamic_pointer_cast<Container>(container->getTopParent())) {
+                if (const auto &depotChest = std::dynamic_pointer_cast<DepotChest>(topContainer)) {
+                    bool isOwner = false;
+
+                    for (const auto &[depotId, depotChestMap] : depotChests) {
+                        if (depotId == 0) {
+                            continue;
+                        }
+
+                        if (depotChestMap == depotChest) {
+                            isOwner = true;
+                        }
+                    }
+
+                    if (!isOwner) {
+                        autoCloseContainers(container);
+                    }
+                } else {
+                    // normal container
+                }
+            } else {
+                autoCloseContainers(container);
+            }
+        }
+
+        // force list update if item exists tier
+        if (item->getTier() > 0 && !requireListUpdate) {
+            requireListUpdate = true;
+        }
+
+        if (shopOwner && !scheduledSaleUpdate && requireListUpdate) {
+            updateSaleShopList(item);
+        }
+    }
 }
 
 void Player::sendUpdateTile(const std::shared_ptr<Tile> &updateTile, const Position &pos) const {
@@ -7997,83 +8039,115 @@ void Player::closeAllExternalContainers() {
 
 // container
 
-void Player::sendAddContainerItem(const std::shared_ptr<Container> &container, std::shared_ptr<Item> item) {
-	if (!client) {
-		return;
-	}
+// void Player::sendAddContainerItem(const std::shared_ptr<Container> &container, std::shared_ptr<Item> item) {
+// 	if (!client) {
+// 		return;
+// 	}
 
-	if (!container) {
-		return;
-	}
+// 	if (!container) {
+// 		return;
+// 	}
 
-	for (const auto &[containerId, containerInfo] : openContainers) {
-		if (containerInfo.container != container) {
-			continue;
-		}
+// 	for (const auto &[containerId, containerInfo] : openContainers) {
+// 		if (containerInfo.container != container) {
+// 			continue;
+// 		}
 
-		uint16_t slot = containerInfo.index;
-		if (container->getID() == ITEM_BROWSEFIELD) {
-			const uint16_t containerSize = container->size() - 1;
-			const uint16_t pageEnd = containerInfo.index + container->capacity() - 1;
-			if (containerSize > pageEnd) {
-				slot = pageEnd;
-				item = container->getItemByIndex(pageEnd);
-			} else {
-				slot = containerSize;
-			}
-		} else if (containerInfo.index >= container->capacity()) {
-			item = container->getItemByIndex(containerInfo.index - 1);
-		}
-		client->sendAddContainerItem(containerId, slot, item);
-	}
+// 		uint16_t slot = containerInfo.index;
+// 		if (container->getID() == ITEM_BROWSEFIELD) {
+// 			const uint16_t containerSize = container->size() - 1;
+// 			const uint16_t pageEnd = containerInfo.index + container->capacity() - 1;
+// 			if (containerSize > pageEnd) {
+// 				slot = pageEnd;
+// 				item = container->getItemByIndex(pageEnd);
+// 			} else {
+// 				slot = containerSize;
+// 			}
+// 		} else if (containerInfo.index >= container->capacity()) {
+// 			item = container->getItemByIndex(containerInfo.index - 1);
+// 		}
+// 		client->sendAddContainerItem(containerId, slot, item);
+// 	}
+// }
+
+
+void Player::sendAddContainerItem(const std::shared_ptr<Container>& container, std::shared_ptr<Item> item) {
+    if (!client || !container) {
+        return;
+    }
+
+    alteredContainers.insert(container);
+    updateContainersScheduled = true;
 }
 
-void Player::sendUpdateContainerItem(const std::shared_ptr<Container> &container, uint16_t slot, const std::shared_ptr<Item> &newItem) {
-	if (!client) {
-		return;
-	}
 
-	for (const auto &[containerId, containerInfo] : openContainers) {
-		if (containerInfo.container != container) {
-			continue;
-		}
+// void Player::sendUpdateContainerItem(const std::shared_ptr<Container> &container, uint16_t slot, const std::shared_ptr<Item> &newItem) {
+// 	if (!client) {
+// 		return;
+// 	}
 
-		if (slot < containerInfo.index) {
-			continue;
-		}
+// 	for (const auto &[containerId, containerInfo] : openContainers) {
+// 		if (containerInfo.container != container) {
+// 			continue;
+// 		}
 
-		const uint16_t pageEnd = containerInfo.index + container->capacity();
-		if (slot >= pageEnd) {
-			continue;
-		}
+// 		if (slot < containerInfo.index) {
+// 			continue;
+// 		}
 
-		client->sendUpdateContainerItem(containerId, slot, newItem);
-	}
+// 		const uint16_t pageEnd = containerInfo.index + container->capacity();
+// 		if (slot >= pageEnd) {
+// 			continue;
+// 		}
+
+// 		client->sendUpdateContainerItem(containerId, slot, newItem);
+// 	}
+// }
+
+void Player::sendUpdateContainerItem(const std::shared_ptr<Container>& container, uint16_t slot, const std::shared_ptr<Item>& newItem) {
+    if (!client || !container) {
+        return;
+    }
+
+    alteredContainers.insert(container);
+    updateContainersScheduled = true;
 }
 
-void Player::sendRemoveContainerItem(const std::shared_ptr<Container> &container, uint16_t slot) {
-	if (!client) {
-		return;
-	}
 
-	if (!container) {
-		return;
-	}
+// void Player::sendRemoveContainerItem(const std::shared_ptr<Container> &container, uint16_t slot) {
+// 	if (!client) {
+// 		return;
+// 	}
 
-	for (auto &[containerId, containerInfo] : openContainers) {
-		if (containerInfo.container != container) {
-			continue;
-		}
+// 	if (!container) {
+// 		return;
+// 	}
 
-		uint16_t &firstIndex = containerInfo.index;
-		if (firstIndex > 0 && firstIndex >= container->size() - 1) {
-			firstIndex -= container->capacity();
-			sendContainer(containerId, container, false, firstIndex);
-		}
+// 	for (auto &[containerId, containerInfo] : openContainers) {
+// 		if (containerInfo.container != container) {
+// 			continue;
+// 		}
 
-		client->sendRemoveContainerItem(containerId, std::max<uint16_t>(slot, firstIndex), container->getItemByIndex(container->capacity() + firstIndex));
-	}
+// 		uint16_t &firstIndex = containerInfo.index;
+// 		if (firstIndex > 0 && firstIndex >= container->size() - 1) {
+// 			firstIndex -= container->capacity();
+// 			sendContainer(containerId, container, false, firstIndex);
+// 		}
+
+// 		client->sendRemoveContainerItem(containerId, std::max<uint16_t>(slot, firstIndex), container->getItemByIndex(container->capacity() + firstIndex));
+// 	}
+// }
+
+
+void Player::sendRemoveContainerItem(const std::shared_ptr<Container>& container, uint16_t slot) {
+    if (!client || !container) {
+        return;
+    }
+
+    alteredContainers.insert(container);
+    updateContainersScheduled = true;
 }
+
 
 void Player::sendContainer(uint8_t cid, const std::shared_ptr<Container> &container, bool hasParent, uint16_t firstIndex) const {
 	if (client) {
@@ -9730,41 +9804,41 @@ void Player::registerForgeHistoryDescription(ForgeHistory history) {
 // Quickloot
 
 void Player::openPlayerContainers() {
-	std::vector<std::pair<uint8_t, std::shared_ptr<Container>>> openContainersList;
+    std::vector<std::pair<uint8_t, std::shared_ptr<Container>>> openContainersList;
 
-	for (int32_t i = CONST_SLOT_FIRST; i <= CONST_SLOT_LAST; i++) {
-		const auto &item = inventory[i];
-		if (!item) {
-			continue;
-		}
+    for (int32_t i = CONST_SLOT_FIRST; i <= CONST_SLOT_LAST; i++) {
+        const auto& item = inventory[i];
+        if (!item) {
+            continue;
+        }
 
-		const auto &itemContainer = item->getContainer();
-		if (itemContainer) {
-			const auto &cid = item->getAttribute<int64_t>(ItemAttribute_t::OPENCONTAINER);
-			if (cid > 0) {
-				openContainersList.emplace_back(cid, itemContainer);
-			}
-			for (ContainerIterator it = itemContainer->iterator(); it.hasNext(); it.advance()) {
-				const auto &subContainer = (*it)->getContainer();
-				if (subContainer) {
-					const auto &subcid = (*it)->getAttribute<uint8_t>(ItemAttribute_t::OPENCONTAINER);
-					if (subcid > 0) {
-						openContainersList.emplace_back(subcid, subContainer);
-					}
-				}
-			}
-		}
-	}
+        const auto& itemContainer = item->getContainer();
+        if (itemContainer) {
+            const auto& cid = item->getAttribute<int64_t>(ItemAttribute_t::OPENCONTAINER);
+            if (cid > 0) {
+                openContainersList.emplace_back(cid, itemContainer);
+            }
+            for (ContainerIterator it = itemContainer->iterator(); it.hasNext(); it.advance()) {
+                const auto& subContainer = (*it)->getContainer();
+                if (subContainer) {
+                    const auto& subcid = (*it)->getAttribute<uint8_t>(ItemAttribute_t::OPENCONTAINER);
+                    if (subcid > 0) {
+                        openContainersList.emplace_back(subcid, subContainer);
+                    }
+                }
+            }
+        }
+    }
 
-	std::ranges::sort(openContainersList, [](const std::pair<uint8_t, std::shared_ptr<Container>> &left, const std::pair<uint8_t, std::shared_ptr<Container>> &right) {
-		return left.first < right.first;
-	});
+    std::ranges::sort(openContainersList, [](const std::pair<uint8_t, std::shared_ptr<Container>>& left, const std::pair<uint8_t, std::shared_ptr<Container>>& right) {
+        return left.first < right.first;
+    });
 
-	for (const auto &[containerId, container] : openContainersList) {
-		addContainer(containerId - 1, container);
-		onSendContainer(container);
-	}
+    for (const auto& [containerId, container] : openContainersList) {
+        addContainer(containerId - 1, container);
+    }
 }
+
 
 // Quickloot
 
@@ -9772,14 +9846,6 @@ void Player::sendLootContainers() const {
 	if (client) {
 		client->sendLootContainers();
 	}
-}
-
-void Player::sendPlayerTyping(const std::shared_ptr<Creature> &creature, uint8_t typing) const {
-	if (!client) {
-		return;
-	}
-
-	client->sendPlayerTyping(creature, typing);
 }
 
 void Player::sendSingleSoundEffect(const Position &pos, SoundEffect_t id, SourceEffect_t source) const {
@@ -10461,15 +10527,6 @@ const AnimusMastery &Player::animusMastery() const {
 	return m_animusMastery;
 }
 
-// Attached Effects interface
-PlayerAttachedEffects &Player::attachedEffects() {
-	return m_playerAttachedEffects;
-}
-
-const PlayerAttachedEffects &Player::attachedEffects() const {
-	return m_playerAttachedEffects;
-}
-
 void Player::sendLootMessage(const std::string &message) const {
 	const auto &party = getParty();
 	if (!party) {
@@ -10639,12 +10696,7 @@ bool Player::canSpeakWithHireling(uint8_t speechbubble) {
 }
 
 uint16_t Player::getPlayerVocationEnum() const {
-	const auto &vocation = getVocation();
-	if (!vocation) {
-		return 0;
-	}
-
-	const int cipTibiaId = vocation->getClientId();
+	const int cipTibiaId = getVocation()->getClientId();
 	if (cipTibiaId == 1 || cipTibiaId == 11) {
 		return Vocation_t::VOCATION_KNIGHT_CIP; // Knight
 	} else if (cipTibiaId == 2 || cipTibiaId == 12) {
